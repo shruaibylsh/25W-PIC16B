@@ -1,0 +1,735 @@
+{
+  "cells": [
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "Have you ever wondered how computers tell apart images showing different categories in the \"verify if you are human\" questions? In this blog post, we'll explore image classification using Keras and TensorFlow datasets. We'll build a system that can distinguish between pictures of cats and dogs – similar to how these verification systems might identify cars, crosswalks, or traffic lights.\n",
+        "\n",
+        "# Data Preparation\n",
+        "## Loading Packages and Obtaining Data\n",
+        "\n",
+        "Let's import the necessary libraries for our project:\n"
+      ],
+      "id": "f49ab9b3"
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "source": [
+        "import os\n",
+        "import keras\n",
+        "from keras import utils\n",
+        "import tensorflow as tf\n",
+        "import tensorflow_datasets as tfds\n",
+        "import matplotlib.pyplot as plt\n",
+        "import numpy as np"
+      ],
+      "id": "f34bd5e3",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "Let's first load the dataset. We’ll be using the `cats_vs_dogs` dataset from Kaggle, which contains labeled images of cats and dogs. We’ll split the dataset into training, validation, and test sets:\n"
+      ],
+      "id": "94fdcd10"
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "source": [
+        "train_ds, validation_ds, test_ds = tfds.load(\n",
+        "    \"cats_vs_dogs\",\n",
+        "    # 40% for training, 10% for validation, and 10% for test (the rest unused)\n",
+        "    split=[\"train[:40%]\", \"train[40%:50%]\", \"train[50%:60%]\"],\n",
+        "    as_supervised=True,  # Include labels\n",
+        ")\n",
+        "\n",
+        "print(f\"Number of training samples: {train_ds.cardinality()}\")\n",
+        "print(f\"Number of validation samples: {validation_ds.cardinality()}\")\n",
+        "print(f\"Number of test samples: {test_ds.cardinality()}\")"
+      ],
+      "id": "f63de45a",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "The dataset contains images of different sizes, which is problematic for neural networks that expect inputs of consistent dimensions. Let's resize all images to a fixed size of 150x150 pixels:\n"
+      ],
+      "id": "f20e1e0e"
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "source": [
+        "resize_fn = keras.layers.Resizing(150, 150)\n",
+        "\n",
+        "train_ds = train_ds.map(lambda x, y: (resize_fn(x), y))\n",
+        "validation_ds = validation_ds.map(lambda x, y: (resize_fn(x), y))\n",
+        "test_ds = test_ds.map(lambda x, y: (resize_fn(x), y))"
+      ],
+      "id": "d4728018",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "To ensure efficient training, we'll optimize our data pipeline:\n"
+      ],
+      "id": "355feea9"
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "source": [
+        "from tensorflow import data as tf_data\n",
+        "batch_size = 64\n",
+        "\n",
+        "train_ds = train_ds.batch(batch_size).prefetch(tf_data.AUTOTUNE).cache()\n",
+        "validation_ds = validation_ds.batch(batch_size).prefetch(tf_data.AUTOTUNE).cache()\n",
+        "test_ds = test_ds.batch(batch_size).prefetch(tf_data.AUTOTUNE).cache()"
+      ],
+      "id": "1829472b",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## Understanding the Data Set\n",
+        "Before training a model, it’s important to understand the dataset. Let’s visualize some images to get a sense of what we’re working with. We’ll create a function to display three random cat images and three random dog images:\n"
+      ],
+      "id": "ea42e46b"
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "source": [
+        "def visualize_cats_and_dogs(dataset):\n",
+        "    cat_images = []\n",
+        "    dog_images = []\n",
+        "\n",
+        "    # retrive 3 images for cats and dogs each\n",
+        "    for images, labels in dataset.take(1): # take 1 batch\n",
+        "        for image, label in zip(images, labels):\n",
+        "            if label == 0 and len(cat_images) < 3:\n",
+        "                cat_images.append(image.numpy())\n",
+        "            elif label == 1 and len(dog_images) < 3:\n",
+        "                dog_images.append(image.numpy())\n",
+        "            if len(cat_images) == 3 and len(dog_images) == 3:\n",
+        "                break\n",
+        "\n",
+        "    plt.figure(figsize=(10, 5))\n",
+        "    for i in range(3):\n",
+        "        plt.subplot(2, 3, i + 1)\n",
+        "        plt.imshow(cat_images[i] / 255.0)\n",
+        "        plt.title(\"Cat\")\n",
+        "        plt.axis(\"off\")\n",
+        "\n",
+        "        plt.subplot(2, 3, i + 4)\n",
+        "        plt.imshow(dog_images[i] / 255.0)\n",
+        "        plt.title(\"Dog\")\n",
+        "        plt.axis(\"off\")\n",
+        "\n",
+        "    plt.show()\n",
+        "\n",
+        "visualize_cats_and_dogs(train_ds)"
+      ],
+      "id": "3fcca30b",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "Next, it's also important for us to know the distribution of labels in the dataset. This helps us establish a baseline for our model, which is the model tat always guesses the most frequent label. We'll treat this as the benchmark for improvement.\n",
+        "\n",
+        "Let’s compute the number of cat and dog images in the training set:\n"
+      ],
+      "id": "91001ca7"
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "source": [
+        "labels_iterator = train_ds.unbatch().map(lambda image, label: label).as_numpy_iterator()\n",
+        "\n",
+        "cat_count = 0\n",
+        "dog_count = 0\n",
+        "\n",
+        "for label in labels_iterator:\n",
+        "    if label == 0:\n",
+        "        cat_count += 1\n",
+        "    else:\n",
+        "        dog_count += 1\n",
+        "\n",
+        "baseline_accuracy = max(cat_count, dog_count) / (cat_count + dog_count) * 100\n",
+        "\n",
+        "print(f\"Number of cat images: {cat_count}\")\n",
+        "print(f\"Number of dog images: {dog_count}\")\n",
+        "print(f\"Baseline accuracy: {baseline_accuracy:.2f}%\")"
+      ],
+      "id": "f2683330",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "We see that the accuracy for our baseline model is 50.17%, indicating an even distribution of cats and dogs in our dataset.\n",
+        "\n",
+        "For the next steps, our goal is to build a model that performs significantly better than this baseline.\n",
+        "\n",
+        "# Basic CNN Model with Keras\n",
+        "Let's start by building our first convolutional neural network (CNN) model using Keras. We’ll include convolutional layers, pooling layers, and dropout layers to create a robust architecture. Finally, we’ll train the model and evaluate its performance.\n"
+      ],
+      "id": "b1fd3fad"
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "source": [
+        "from keras import layers, models\n",
+        "\n",
+        "model1 = models.Sequential([\n",
+        "    layers.Conv2D(32, (3, 3), activation='relu', input_shape=(150, 150, 3)),\n",
+        "    layers.MaxPooling2D((2, 2)),\n",
+        "    layers.Conv2D(64, (3, 3), activation='relu'),\n",
+        "    layers.MaxPooling2D((2, 2)),\n",
+        "    layers.Conv2D(128, (3, 3), activation='relu'),\n",
+        "    layers.MaxPooling2D((2, 2)),\n",
+        "    layers.Flatten(),\n",
+        "    layers.Dense(512, activation='relu'),\n",
+        "    layers.Dropout(0.3),\n",
+        "    layers.Dense(1, activation='sigmoid')  # Binary classification (cat or dog)\n",
+        "])"
+      ],
+      "id": "ccd40a41",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "After experimenting with different parameters for the model (using 2 conv2D and maxpooling layers, larger dropour rates), here is the number of parameters in each layer we are using for model 1, which achieves decent accuracy;\n"
+      ],
+      "id": "f7d1dc44"
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "source": [
+        "model1.summary()"
+      ],
+      "id": "02c22dad",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## Training the Model\n",
+        "Let's now train our model for 20 epochs.\n"
+      ],
+      "id": "974bb397"
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "source": [
+        "model1.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])\n",
+        "\n",
+        "hist1 = model1.fit(train_ds, epochs = 20, validation_data = validation_ds)"
+      ],
+      "id": "f3cb75a2",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## Visualizing Model Accuracy\n",
+        "Now, let's visualize our model training results to better understand its accuracy. We’ll plot the training and validation accuracy to evaluate the model’s performance.\n"
+      ],
+      "id": "50fae165"
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "source": [
+        "# Plot training and validation accuracy\n",
+        "def visualize_model_accuracy(history):\n",
+        "  plt.plot(history.history['accuracy'], label='Training Accuracy')\n",
+        "  plt.plot(history.history['val_accuracy'], label='Validation Accuracy')\n",
+        "  plt.xlabel('Epochs')\n",
+        "  plt.ylabel('Accuracy')\n",
+        "  plt.title('Training and Validation Accuracy')\n",
+        "  plt.legend()\n",
+        "  plt.show()\n",
+        "\n",
+        "visualize_model_accuracy(hist1)"
+      ],
+      "id": "099ee49d",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "**During training, the validation accuracy of the model stablizes between 55% to 60% during training.** It is slightly better than the baseline model by 5%.\n",
+        "\n",
+        "However, overfitting is observed because the training accuracy keeps increasing while the validation accuracy stabilizes at a value well below it. This indicates that we have overfitted our model on the training data set such that it does not generalizes too well to the validation set.\n",
+        "\n",
+        "# Model with Data Augmentation\n",
+        "In this section, we’ll improve our model by adding data augmentation layers. Data augmentation is a technique that artificially expands the training dataset by applying random transformations (e.g., flipping, rotating, zooming) to the images. This helps the model generalize better and reduces overfitting.\n",
+        "\n",
+        "## Adding Data Augmentation Layers\n",
+        "We’ll use 2 argumentation layers:\n",
+        "- RandomFlip: Randomly flips images horizontally or vertically.\n",
+        "- RandomRotation: Randomly rotates images by a specified angle.\n",
+        "\n",
+        "Let’s visualize the effect of these transformations on a sample image:\n"
+      ],
+      "id": "1504899a"
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "source": [
+        "# Load a sample image\n",
+        "for images, labels in train_ds.take(1):\n",
+        "    sample_image = images[0].numpy()\n",
+        "\n",
+        "# Define augmentation layers\n",
+        "flip_layer = layers.RandomFlip(\"horizontal_and_vertical\")\n",
+        "rotate_layer = layers.RandomRotation(0.15)  # Rotate by up to 15%\n",
+        "\n",
+        "# Apply augmentations\n",
+        "flipped_images = [flip_layer(sample_image) for _ in range(3)]\n",
+        "rotated_images = [rotate_layer(sample_image) for _ in range(3)]\n",
+        "\n",
+        "# Plot the original, flipped, and rotated images\n",
+        "plt.figure(figsize=(10, 7))\n",
+        "\n",
+        "# Row 1: Original and flipped images\n",
+        "plt.subplot(2, 3, 1)\n",
+        "plt.imshow(sample_image / 255.0)\n",
+        "plt.title(\"Original\")\n",
+        "plt.axis(\"off\")\n",
+        "\n",
+        "for i, img in enumerate(flipped_images):\n",
+        "    plt.subplot(2, 3, i + 2)\n",
+        "    plt.imshow(img / 255.0)\n",
+        "    plt.title(f\"Flipped {i + 1}\")\n",
+        "    plt.axis(\"off\")\n",
+        "\n",
+        "# Row 2: Rotated images\n",
+        "for i, img in enumerate(rotated_images):\n",
+        "    plt.subplot(2, 3, i + 4)\n",
+        "    plt.imshow(img / 255.0)\n",
+        "    plt.title(f\"Rotated {i + 1}\")\n",
+        "    plt.axis(\"off\")\n",
+        "\n",
+        "plt.tight_layout()\n",
+        "plt.show()"
+      ],
+      "id": "d2d3915b",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## Training the Model\n",
+        "Now, let’s create model 2 which includes the data augmentation layers. The architecture will be similar to model1, but with augmentation layers added at the beginning:\n"
+      ],
+      "id": "58a31841"
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "source": [
+        "model2 = models.Sequential([\n",
+        "    layers.Input(shape=(150, 150, 3)),\n",
+        "\n",
+        "    # Data augmentation layers\n",
+        "    layers.RandomFlip(\"horizontal_and_vertical\"),\n",
+        "    layers.RandomRotation(0.15),\n",
+        "\n",
+        "    # Convolutional layers\n",
+        "    layers.Conv2D(32, (3, 3), activation='relu', input_shape=(150, 150, 3)),\n",
+        "    layers.MaxPooling2D((2, 2)),\n",
+        "    layers.Conv2D(64, (3, 3), activation='relu'),\n",
+        "    layers.MaxPooling2D((2, 2)),\n",
+        "    layers.Conv2D(128, (3, 3), activation='relu'),\n",
+        "    layers.MaxPooling2D((2, 2)),\n",
+        "    layers.Conv2D(256, (3, 3), activation='relu'),\n",
+        "    layers.MaxPooling2D((2, 2)),\n",
+        "\n",
+        "    # Fully connected layers\n",
+        "    layers.Flatten(),\n",
+        "    layers.Dense(256, activation='relu'),\n",
+        "    layers.Dropout(0.2),\n",
+        "    layers.Dense(1, activation='sigmoid')  # Binary classification\n",
+        "])\n",
+        "\n",
+        "model2.summary()"
+      ],
+      "id": "ba917fb5",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "Now, let's train the model again for 20 epochs.\n"
+      ],
+      "id": "06e699ea"
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "source": [
+        "model2.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])\n",
+        "\n",
+        "hist2 = model2.fit(train_ds, epochs = 20, validation_data = validation_ds)"
+      ],
+      "id": "69b05e3e",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## Visualizing Model Accuracy\n"
+      ],
+      "id": "997412dc"
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "source": [
+        "visualize_model_accuracy(hist2)"
+      ],
+      "id": "24bbc25d",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "**During training, the validation accuracy of the model keeps increasing and stablizes between 75% and 80%**, which is about 20% better than model 1. There is not so much overfitting as the trends of the training and validation accuracy align very well.\n",
+        "\n",
+        "# Data Preprocessing Model\n",
+        "Now, we’ll enhance our model by adding data preprocessing to normalize the pixel values of the images. Normalizing pixel values (e.g., scaling them to a range of 0 to 1 or -1 to 1) can help the model train faster and converge more effectively. We’ll incorporate this preprocessing step into our model pipeline.\n"
+      ],
+      "id": "513c7d7f"
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "source": [
+        "def preprocess():\n",
+        "  i = keras.Input(shape=(150, 150, 3))\n",
+        "  # The pixel values have the range of (0, 255), but many models will work better if rescaled to (-1, 1.)\n",
+        "  # outputs: `(inputs * scale) + offset`\n",
+        "  scale_layer = keras.layers.Rescaling(scale=1 / 127.5, offset=-1)\n",
+        "  x = scale_layer(i)\n",
+        "  preprocessor = keras.Model(inputs = i, outputs = x)\n",
+        "  return preprocessor\n",
+        "\n",
+        "preprocess_layer = preprocess()"
+      ],
+      "id": "a778240a",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## Training the Model\n"
+      ],
+      "id": "033b7548"
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "source": [
+        "model3 = models.Sequential([\n",
+        "    layers.Input(shape=(150, 150, 3)),\n",
+        "\n",
+        "    # Preprocessing layer\n",
+        "    preprocess_layer,\n",
+        "\n",
+        "    # Data augmentation layers\n",
+        "    layers.RandomFlip(\"horizontal_and_vertical\"),\n",
+        "    layers.RandomRotation(0.15),\n",
+        "\n",
+        "    # Convolutional layers\n",
+        "    layers.Conv2D(32, (3, 3), activation='relu'),\n",
+        "    layers.MaxPooling2D((2, 2)),\n",
+        "    layers.Conv2D(64, (3, 3), activation='relu'),\n",
+        "    layers.MaxPooling2D((2, 2)),\n",
+        "    layers.Conv2D(128, (3, 3), activation='relu'),\n",
+        "    layers.MaxPooling2D((2, 2)),\n",
+        "    layers.Conv2D(256, (3, 3), activation='relu'),\n",
+        "    layers.MaxPooling2D((2, 2)),\n",
+        "\n",
+        "\n",
+        "    # Fully connected layers\n",
+        "    layers.Flatten(),\n",
+        "    layers.Dense(256, activation='relu'),\n",
+        "    layers.Dropout(0.2),\n",
+        "    layers.Dense(1, activation='sigmoid')  # Binary classification\n",
+        "])\n",
+        "\n",
+        "model3.summary()"
+      ],
+      "id": "4e367641",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "source": [
+        "model3.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])\n",
+        "\n",
+        "hist3 = model3.fit(train_ds, epochs = 20, validation_data = validation_ds)"
+      ],
+      "id": "db8713f4",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## Visualizing Model Accuracy\n"
+      ],
+      "id": "e1f4898c"
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "source": [
+        "visualize_model_accuracy(hist3)"
+      ],
+      "id": "07e468c2",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "**During training, the validation accuracy of the model stablizes between 85% and 88%**, which is about 30% better than model 1. There is very little evidence of overfitting - the training accuracy is a little (about 0.02%) higher than the validation accuracy.\n",
+        "\n",
+        "## Transfer Learning Model\n",
+        "Now, we’ll leverage transfer learning to build a highly accurate model for classifying cats and dogs. Transfer learning allows us to use a pre-trained model (trained on a large dataset like ImageNet) as a starting point for our task. This approach is especially useful when working with limited data, as it enables us to benefit from the features learned by the pre-trained model.\n",
+        "\n",
+        "We’ll use `MobileNetV3Large`, a pre-trained model, as the base for our new model.\n"
+      ],
+      "id": "bc35057d"
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "source": [
+        "IMG_SHAPE = (150, 150, 3)\n",
+        "base_model = keras.applications.MobileNetV3Large(input_shape=IMG_SHAPE,\n",
+        "                                               include_top=False,\n",
+        "                                               weights='imagenet')\n",
+        "base_model.trainable = False\n",
+        "\n",
+        "i = keras.Input(shape=IMG_SHAPE)\n",
+        "x = base_model(i, training = False)\n",
+        "base_model_layer = keras.Model(inputs = i, outputs = x)"
+      ],
+      "id": "cbc1eed1",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## Training the Model\n",
+        "Now, let’s build model4 using data augmentation layers from previous models, `MobileNetV3Large` as the base model, and additional layers for classification.\n"
+      ],
+      "id": "3a72c3d2"
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "source": [
+        "model4 = models.Sequential([\n",
+        "    layers.Input(shape=(150, 150, 3)),\n",
+        "\n",
+        "    # Data augmentation layers\n",
+        "    layers.RandomFlip(\"horizontal_and_vertical\"),\n",
+        "    layers.RandomRotation(0.15),\n",
+        "\n",
+        "    # Base model (MobileNetV3Large)\n",
+        "    base_model_layer,\n",
+        "\n",
+        "    # Additional layers\n",
+        "    layers.GlobalMaxPooling2D(),\n",
+        "    layers.Dropout(0.2),\n",
+        "    layers.Dense(1, activation='sigmoid')  # Binary classification\n",
+        "])\n",
+        "\n",
+        "model4.summary()"
+      ],
+      "id": "a7e8471a",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "In the summary of model 4, we notice that there are 2,996,352 non-trainable parameters, which are hidden in the base_model_layer. Therefore, we are only training 961 parameters here.\n"
+      ],
+      "id": "369c33c9"
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "source": [
+        "model4.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])\n",
+        "\n",
+        "hist4 = model4.fit(train_ds, epochs = 20, validation_data = validation_ds)"
+      ],
+      "id": "73b31a20",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## Visualizing Model Accuracy\n"
+      ],
+      "id": "28a44253"
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "source": [
+        "visualize_model_accuracy(hist4)"
+      ],
+      "id": "7d3bbf29",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "**During training, the validation accuracy of the model stablizes above 95%.** This is 30% better than model 1! There is little overfitting as the accuracy of the validation set exceeds that of the training set.\n",
+        "\n",
+        "# Summary and Comparison\n",
+        "Now that we have built four different models, let's compare their results and evaluate their performance on the unseen test dataset. This will give us a clear understanding of how well our best model generalizes to new data.\n",
+        "\n",
+        "Let's compare their validation accuracy on the same plot:\n"
+      ],
+      "id": "235596bb"
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "source": [
+        "# Plot validation accuracy for all models\n",
+        "plt.figure(figsize=(10, 6))\n",
+        "\n",
+        "plt.plot(hist1.history['val_accuracy'], label='Model 1')\n",
+        "plt.plot(hist2.history['val_accuracy'], label='Model 2')\n",
+        "plt.plot(hist3.history['val_accuracy'], label='Model 3')\n",
+        "plt.plot(hist4.history['val_accuracy'], label='Model 4')\n",
+        "\n",
+        "plt.xlabel('Epochs')\n",
+        "plt.ylabel('Validation Accuracy')\n",
+        "plt.title('Validation Accuracy of All Models')\n",
+        "plt.legend()\n",
+        "plt.grid(True)\n",
+        "plt.show()"
+      ],
+      "id": "bc179325",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "We see that the validation accuracy of model 4, the transfer learning model, achieves the highest validation accuracy and is well above other models.\n",
+        "\n",
+        "Let's also test the performance of the four models on the test set:\n"
+      ],
+      "id": "fef93280"
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "source": [
+        "# Evaluate model1 on the test set\n",
+        "test_loss1, test_accuracy1 = model1.evaluate(test_ds)\n",
+        "print(f\"Model 1 - Test Accuracy: {test_accuracy1 * 100:.2f}%\")\n",
+        "\n",
+        "# Evaluate model2 on the test set\n",
+        "test_loss2, test_accuracy2 = model2.evaluate(test_ds)\n",
+        "print(f\"Model 2 - Test Accuracy: {test_accuracy2 * 100:.2f}%\")\n",
+        "\n",
+        "# Evaluate model3 on the test set\n",
+        "test_loss3, test_accuracy3 = model3.evaluate(test_ds)\n",
+        "print(f\"Model 3 - Test Accuracy: {test_accuracy3 * 100:.2f}%\")\n",
+        "\n",
+        "# Evaluate model4 on the test set\n",
+        "test_loss4, test_accuracy4 = model4.evaluate(test_ds)\n",
+        "print(f\"Model 4 - Test Accuracy: {test_accuracy4 * 100:.2f}%\")"
+      ],
+      "id": "fba3c874",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "We see that the test accuracy for model 4 is 95.83%, well above that for other models that we built from scratch. This shows that transfer learning might be a really effective approach in model training!\n"
+      ],
+      "id": "fa170617"
+    }
+  ],
+  "metadata": {
+    "kernelspec": {
+      "name": "python3",
+      "language": "python",
+      "display_name": "Python 3 (ipykernel)",
+      "path": "/opt/anaconda3/share/jupyter/kernels/python3"
+    }
+  },
+  "nbformat": 4,
+  "nbformat_minor": 5
+}
